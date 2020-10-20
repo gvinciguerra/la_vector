@@ -96,13 +96,11 @@ private:
     using canonical_segment = typename OptimalPiecewiseLinearModel<position_type, K>::CanonicalSegment;
     using base_segment_type = typename std::conditional_t<auto_bpc, variable_bpc, constant_bpc>;
 
-    #pragma pack(push, 1)
     struct canonical_segment_bpc : canonical_segment {
         uint8_t bpc;
         canonical_segment_bpc() = default;
         canonical_segment_bpc(const canonical_segment &cs, uint8_t bpc) : canonical_segment(cs), bpc(bpc) {};
     };
-    #pragma pack(pop)
 
     /**
      * Returns an iterator to the segment responsible for decompressing the element at the given position.
@@ -255,6 +253,9 @@ public:
           n(std::distance(begin, end)),
           total_bits_corrections(),
           segments() {
+        if (n == 0)
+            return;
+
         using value_type = typename std::conditional_t<auto_bpc, canonical_segment_bpc, canonical_segment>;
         std::vector<value_type> canonical_segments;
         if constexpr (auto_bpc)
