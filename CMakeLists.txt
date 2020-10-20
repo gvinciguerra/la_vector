@@ -18,3 +18,6 @@ target_include_directories(${PROJECT_NAME} INTERFACE include)
 
 add_executable(example example.cpp)
 target_link_libraries(example la_vector sdsl)
+
+enable_testing()
+add_subdirectory(test)
