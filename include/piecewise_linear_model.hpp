@@ -23,7 +23,6 @@ typedef int omp_int_t;
 inline omp_int_t omp_get_max_threads() { return 1; }
 #endif
 
-#include <omp.h>
 #include <cmath>
 #include <limits>
 #include <vector>
