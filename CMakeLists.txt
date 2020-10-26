@@ -5,20 +5,19 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
 set(CMAKE_POLICY_DEFAULT_CMP0048 NEW)
 
-find_package(OpenMP)
-if (OPENMP_FOUND)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${OpenMP_EXE_LINKER_FLAGS}")
-endif ()
-
 add_subdirectory(lib/sdsl-lite)
 
 add_library(${PROJECT_NAME} INTERFACE)
+target_link_libraries(${PROJECT_NAME} INTERFACE sdsl)
 target_include_directories(${PROJECT_NAME} INTERFACE include)
 
+find_package(OpenMP)
+if (OpenMP_CXX_FOUND)
+    target_link_libraries(${PROJECT_NAME} INTERFACE OpenMP::OpenMP_CXX)
+endif ()
+
 add_executable(example example.cpp)
-target_link_libraries(example la_vector sdsl)
+target_link_libraries(example la_vector)
 
 enable_testing()
 add_subdirectory(test)
