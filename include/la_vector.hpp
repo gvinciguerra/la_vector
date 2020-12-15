@@ -128,51 +128,41 @@ private:
         return it == segments.begin() ? it : std::prev(it);
     }
 
-    template<typename RandomIt>
-    static std::vector<canonical_segment> standard_segmentation(RandomIt begin, RandomIt end, uint8_t bpc) {
+    template<typename RandomIt, bool Enable = !auto_bpc, typename std::enable_if_t<Enable, int> = 0>
+    static std::pair<std::vector<canonical_segment>, size_t> make_segmentation(RandomIt begin, RandomIt end) {
         auto n = std::distance(begin, end);
-        auto eps = BPC_TO_EPSILON(bpc);
+        auto eps = BPC_TO_EPSILON(t_bpc);
         std::vector<canonical_segment> out;
         out.reserve(eps > 0 ? n / (eps * eps) : n / 8);
         auto in_fun = [begin](auto i) { return std::pair<position_type, K>(i, begin[i]); };
         auto out_fun = [&out](auto, auto, auto cs) { out.push_back(cs); };
         make_segmentation_par(n, eps, in_fun, out_fun);
-        return out;
+        return {out, n * t_bpc};
     }
 
-    template<typename RandomIt>
-    static std::pair<std::vector<canonical_segment_bpc>, size_t>
-    space_efficient_segmentation(RandomIt begin, RandomIt end) {
+    template<typename RandomIt, bool Enable = auto_bpc, typename std::enable_if_t<Enable, int> = 0>
+    static std::pair<std::vector<canonical_segment_bpc>, size_t> make_segmentation(RandomIt begin, RandomIt end) {
         const auto n = size_t(std::distance(begin, end));
-        auto max_bpc = (1 + uint8_t(std::log2(begin[n - 1]))) / 2;
-
-        std::vector<std::vector<canonical_segment>> segmentations(max_bpc + 1);
-
-        #pragma omp parallel for default(none) firstprivate(n, max_bpc, begin, end) shared(segmentations)
-        for (uint8_t bpc = 0; bpc <= max_bpc; ++bpc) {
-            if (bpc == 1)
-                continue;
-            segmentations[bpc] = standard_segmentation(begin, end, bpc);
-            segmentations[bpc].emplace_back(n);
-        }
-
-        // Ignore redundant segmentations
-        auto cmp = [](auto &a, auto &b) { return a.size() == b.size(); };
-        segmentations.erase(std::adjacent_find(segmentations.begin(), segmentations.end(), cmp), segmentations.end());
-        max_bpc = segmentations.size() - 1;
+        const auto max_bpc = (1 + uint8_t(std::log2(begin[n - 1]))) / 2;
 
         std::vector<size_t> frontier(max_bpc + 1);
-        auto advance_frontier = [&](auto bpc, auto i) {
-            // Move frontier[bpc] so that the segment at segmentations[bpc][frontier[bpc]] covers i
-            auto &sm = segmentations[bpc];
-            for (; frontier[bpc] + 1 < sm.size() && sm[frontier[bpc] + 1].get_first_x() <= i; ++frontier[bpc])
+        std::vector<OptimalPiecewiseLinearModel<position_type, K>> segmentations;
+        for (auto bpc = 0; bpc <= max_bpc; ++bpc)
+            segmentations.emplace_back(BPC_TO_EPSILON(bpc));
+
+        auto advance_frontier = [&](auto bpc, auto target) {
+            if (frontier[bpc] > target)
+                return frontier[bpc];
+
+            size_t i;
+            for (i = frontier[bpc]; i < n && segmentations[bpc].add_point(i, begin[i]); ++i)
                 continue;
-            return sm[frontier[bpc] + 1].get_first_x();
+            return frontier[bpc] = i;
         };
 
         // Find the shortest path
         std::vector<size_t> distance(n + 1, -1);
-        std::vector<std::unique_ptr<canonical_segment_bpc>> predecessor(n + 1);
+        std::vector<std::unique_ptr<canonical_segment_bpc>> parent(n + 1);
         distance[0] = 0;
 
         for (size_t i = 0, next_i = -1; i < n; i = next_i, next_i = -1) {
@@ -183,25 +173,24 @@ private:
 
                 // Relax edge (i, j)
                 if (distance[j] > distance[i] + weight_ij) {
-                    auto &s = segmentations[bpc][frontier[bpc]];
                     distance[j] = distance[i] + weight_ij;
-                    predecessor[j] = std::make_unique<canonical_segment_bpc>(s.copy(i), bpc);
+                    parent[j] = std::make_unique<canonical_segment_bpc>(segmentations[bpc].get_segment().copy(i), bpc);
                 }
 
                 next_i = std::min<size_t>(next_i, j);
             }
         }
 
-        // Traverse the predecessor map to build the result
-        if (!predecessor[n])
+        // Traverse the parent links to build the result
+        if (!parent[n])
             throw std::runtime_error("Cannot reach target vertex");
 
         size_t bit_size = 0;
         std::vector<canonical_segment_bpc> out;
         out.reserve(n / 10);
 
-        for (size_t current = n; current != 0; current = predecessor[current]->get_first_x()) {
-            out.push_back(*predecessor[current]);
+        for (size_t current = n; current != 0; current = parent[current]->get_first_x()) {
+            out.push_back(*parent[current]);
             bit_size += (current - out.back().get_first_x()) * out.back().bpc;
         }
 
@@ -246,17 +235,13 @@ public:
         : front(*begin),
           back(*std::prev(end)),
           n(std::distance(begin, end)),
-          total_bits_corrections(n * t_bpc),
+          total_bits_corrections(),
           segments() {
         if (n == 0)
             return;
 
-        using value_type = typename std::conditional_t<auto_bpc, canonical_segment_bpc, canonical_segment>;
-        std::vector<value_type> canonical_segments;
-        if constexpr (auto_bpc)
-            std::tie(canonical_segments, total_bits_corrections) = space_efficient_segmentation(begin, end);
-        else
-            canonical_segments = standard_segmentation(begin, end, t_bpc);
+        auto[canonical_segments, bit_size] = make_segmentation(begin, end);
+        total_bits_corrections = bit_size;
 
         // Store segments and fill the corrections array
         segments.reserve(canonical_segments.size() + 1);
