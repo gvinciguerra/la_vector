@@ -155,6 +155,12 @@ public:
             return true;
         }
 
+        if (epsilon == 0) {
+            auto p1_on_line1 = p1 - rectangle[0] == rectangle[2] - rectangle[0];
+            points_in_hull = p1_on_line1 ? points_in_hull + 1 : 0;
+            return p1_on_line1;
+        }
+
         auto slope1 = rectangle[2] - rectangle[0];
         auto slope2 = rectangle[3] - rectangle[1];
         bool outside_line1 = p1 - rectangle[2] < slope1;
@@ -215,7 +221,7 @@ public:
         return true;
     }
 
-    CanonicalSegment get_segment() {
+    CanonicalSegment get_segment() const {
         if (points_in_hull == 1)
             return CanonicalSegment(rectangle[0], rectangle[1], first_x);
         return CanonicalSegment(rectangle, first_x);
@@ -251,9 +257,7 @@ public:
 
     explicit CanonicalSegment(X first) : CanonicalSegment({first, 0}, {first, 0}, first) {};
 
-    X get_first_x() const {
-        return first;
-    }
+    X get_first_x() const { return first; }
 
     CanonicalSegment copy(X x) const {
         auto c(*this);
