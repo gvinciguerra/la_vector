@@ -50,19 +50,16 @@ class la_vector {
     class la_iterator;
     friend class la_iterator;
 
+    static constexpr bool auto_bpc = t_bpc < 2;
+    static constexpr size_t cache_line_bits = 64 * CHAR_BIT;
+    static constexpr size_t extraction_density = auto_bpc ? 1 : BIT_CEIL(4 * cache_line_bits / t_bpc);
+
     using position_type = typename std::conditional_t<sizeof(K) <= 4, uint32_t, uint64_t>;
     using signed_position_type = typename std::make_signed_t<position_type>;
     using larger_signed_key_type = typename std::conditional_t<sizeof(K) <= 4, int64_t, __int128>;
     using top_level_type = t_top_level<K, typename std::vector<segment>::const_iterator>;
-
-public:
-    using size_type = size_t;
-    using iterator = class la_iterator;
-
-private:
-    static constexpr bool auto_bpc = t_bpc < 2;
-    static constexpr size_t cache_line_bits = 64 * CHAR_BIT;
-    static constexpr size_t extraction_density = auto_bpc ? 1 : BIT_CEIL(4 * cache_line_bits / t_bpc);
+    using canonical_segment = typename OptimalPiecewiseLinearModel<position_type, K>::CanonicalSegment;
+    using base_segment_type = typename std::conditional_t<auto_bpc, variable_bpc, constant_bpc>;
 
     // If auto_bpc, each segment uses a different bit-size for the corrections, stored in segment::bpc. It also stores
     // segment::corrections_offset, which is the cumulative sum of the preceding segments' bpc values and is used as a
@@ -78,8 +75,303 @@ private:
     sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
     top_level_type top_level;         ///< The top level structure on the segments.
 
-    using canonical_segment = typename OptimalPiecewiseLinearModel<position_type, K>::CanonicalSegment;
-    using base_segment_type = typename std::conditional_t<auto_bpc, variable_bpc, constant_bpc>;
+public:
+
+    using size_type = size_t;
+    using iterator = class la_iterator;
+
+    la_vector() = default;
+
+    explicit la_vector(std::vector<K> &data) : la_vector(data.begin(), data.end()) {};
+
+    template<class RandomIt>
+    la_vector(RandomIt begin, RandomIt end)
+        : front(*begin),
+          back(*std::prev(end)),
+          n(std::distance(begin, end)),
+          total_bits_corrections(),
+          segments() {
+        if (n == 0)
+            return;
+
+        auto[canonical_segments, bit_size] = make_segmentation(begin, end);
+        total_bits_corrections = bit_size;
+
+        // Store segments and fill the corrections array
+        segments.reserve(canonical_segments.size() + 1);
+        corrections = decltype(corrections)(CEIL_UINT_DIV(total_bits_corrections, 64) + 1, 0);
+
+        size_t corrections_offset = 0;
+        for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
+            auto i = it->get_first_x();
+            auto j = std::next(it) != canonical_segments.end() ? std::next(it)->get_first_x() : n;
+            uint8_t bpc = t_bpc;
+            if constexpr (auto_bpc)
+                bpc = it->bpc;
+            push_segment(*it, bpc, corrections_offset, begin, i, j);
+            corrections_offset += bpc * (j - i);
+        }
+
+        segments.reserve(segments.size() + 1);
+        segments[segments.size()] = segment(n); // extra segment to avoid bound checking in decode() and lower_bound()
+        top_level = decltype(top_level)(begin, end, segments.begin(), segments.end());
+    }
+
+    /**
+     * Returns the element at the specified position. No bounds checking is performed.
+     * @param i position of the element to return
+     * @return the element at the specified position
+     */
+    K operator[](size_t i) const {
+        assert(i < n);
+        return top_level.segment_for_position(i)->decompress(corrections.data(), n, i);
+    }
+
+    /**
+     * Returns an iterator pointing to the first element that is not less than the given value.
+     * @param value value to compare the elements to
+     * @return an iterator pointing to the first element that is not less than value
+     */
+    iterator lower_bound(K value) const {
+        if (value > back)
+            return end();
+        if (value <= front)
+            return begin();
+
+        auto it = top_level.segment_for_value(value);
+        auto &s = *it;
+        auto &t = *std::next(it);
+        auto[pos, bound] = s.approximate_position(value);
+        pos = std::clamp(pos, s.first, t.first - 1);
+
+        auto lo = pos <= bound + s.first ? s.first : pos - bound;
+        auto hi = std::min(pos + bound + 1, t.first);
+
+        if (!auto_bpc) {
+            // Binary search on the samples
+            auto sample_lo = CEIL_UINT_DIV(lo, extraction_density);
+            auto sample_hi = (hi - 1) / extraction_density + 1;
+
+            while (sample_lo < sample_hi) {
+                size_t mid = sample_lo + (sample_hi - sample_lo) / 2;
+                if (s.decompress(corrections.data(), n, mid * extraction_density) < value) {
+                    sample_lo = mid + 1;
+                    lo = mid * extraction_density;
+                } else {
+                    sample_hi = mid;
+                    hi = mid * extraction_density;
+                }
+            }
+
+            // Binary search on the compressed data
+            while (lo < hi) {
+                auto mid = lo + (hi - lo) / 2;
+                if (s.decompress(corrections.data(), n, mid) < value)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+
+            if (lo == t.first)
+                return iterator(this, t.first, std::next(it));
+            return iterator(this, lo, it);
+        }
+
+        auto val = s.decompress(corrections.data(), n, pos);
+        auto search_forward = val <= value;
+        constexpr auto linear_threshold = 2 * cache_line_bits / (auto_bpc ? 4 : t_bpc);
+
+        if (hi - lo <= linear_threshold) {
+            if (search_forward)
+                while (pos < t.first && val < value)
+                    val = s.decompress(corrections.data(), n, ++pos);
+            else
+                while (pos > s.first && s.decompress(corrections.data(), n, pos - 1) >= value)
+                    --pos;
+
+            if (pos == t.first)
+                return iterator(this, t.first, std::next(it));
+            return iterator(this, pos, it);
+        }
+
+        lo = search_forward ? pos : lo;
+        hi = search_forward ? hi : pos;
+        auto val_at_lo = search_forward ? val : s.decompress(corrections.data(), n, lo);
+        auto val_at_hi = search_forward ? s.decompress(corrections.data(), n, hi - 1) : val;
+        auto count = hi - lo;
+
+        if (hi == t.first and value > val_at_hi)
+            return iterator(this, t.first, std::next(it));
+
+        while (count > linear_threshold) {
+            auto x = larger_signed_key_type(value) - val_at_lo;
+            auto dx = val_at_hi - val_at_lo;
+            auto dy = count - 1;
+            auto step = x * dy / dx;
+            auto p = lo + step;
+            auto val_at_p = s.decompress(corrections.data(), n, p);
+
+            if (value > val_at_p) {
+                lo = p + 1;
+                count -= step + 1;
+                val_at_lo = s.decompress(corrections.data(), n, lo);
+                if (val_at_lo >= value) {
+                    if (lo == t.first)
+                        return iterator(this, t.first, std::next(it));
+                    return iterator(this, lo, it);
+                }
+            } else {
+                hi = p;
+                count = step;
+                val_at_hi = val_at_p;
+            }
+        }
+
+        for (; lo < hi && s.decompress(corrections.data(), n, lo) < value; ++lo);
+
+        if (lo == t.first)
+            return iterator(this, t.first, std::next(it));
+        return iterator(this, lo, it);
+    }
+
+    /**
+     * Returns the number of elements in the container that are less than or equal to @p value.
+     * @param value value to compare elements to
+     * @return the number of elements that are less than or equal to @p value
+     */
+    size_t rank(K value) const { return std::distance(begin(), lower_bound(value)); }
+
+    /**
+     * Returns the i-th smallest element in the container.
+     * @param i rank of the element, must be between 1 and @ref size()
+     * @return the i-th smallest element
+     */
+    K select(size_t i) const {
+        assert(i > 0 && i <= n);
+        return operator[](i - 1);
+    }
+
+    /**
+     * Decodes all the elements of this container into the memory beginning at @p out. The caller is responsible for
+     * allocating enough memory for @p out, that is, at least @ref size() * sizeof(K) bytes.
+     * @param out the beginning of the destination of the decoded elements
+     */
+    void decode(K *out) const {
+        for (auto it = segments.begin(); it != segments.end(); ++it) {
+            auto &s = *it;
+            auto covered = std::next(it)->first - s.first;
+            auto significand = s.slope_significand;
+            auto exponent = s.slope_exponent;
+            auto intercept = s.intercept - BPC_TO_EPSILON(s.bpc);
+
+            #pragma omp simd
+            for (auto j = 0; j < covered; ++j)
+                out[j] = ((j * significand) >> exponent) + intercept;
+
+            for (auto j = 0; j < covered; ++j)
+                out[j] += s.get_correction(corrections.data(), n, j + s.first);
+
+            out += covered;
+        }
+    }
+
+    /**
+     * Decodes all the elements of this container into a vector.
+     * @return a vector with the decoded elements
+     */
+    std::vector<K> decode() const {
+        std::vector<K> out(n);
+        decode(out.data());
+        return out;
+    }
+
+    /**
+     * Returns an iterator to the first element.
+     * @return an iterator to the first element
+     */
+    iterator begin() const { return iterator(this, 0, segments.begin()); }
+
+    /**
+     * Returns an iterator to the element following the last element.
+     * @return an iterator to the element following the last element
+     */
+    iterator end() const { return iterator(this, n, segments.end()); }
+
+    /**
+     * Returns the number of bytes used by this container to encode its elements.
+     * @return the size in bytes of this container
+     */
+    size_t size_in_bytes() const {
+        return total_bits_corrections / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
+    }
+
+    /**
+     * Returns the number of segments (linear models) used in this container to encode its elements.
+     * @return the number of segments in this container
+     */
+    size_t segments_count() const { return segments.size(); }
+
+    /**
+     * Returns the average number of bits per element, that is, @ref size_in_bytes() * 8. / @ref size().
+     * @return the average number of bits per element
+     */
+    double bits_per_element() const { return size_in_bytes() * CHAR_BIT / (double) n; }
+
+    /**
+     * Returns the number of elements in this container.
+     * @return the number of elements in this container
+     */
+    size_t size() const { return n; }
+
+    /**
+     * Serializes the vector to a stream.
+     * @param out output stream
+     * @param v parent node in the structure tree
+     * @param name name of the structure tree node
+     * @return the number of bytes written to out
+     */
+    size_t serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, const std::string &name = "") const {
+        auto child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
+        size_t written_bytes = 0;
+        written_bytes += sdsl::write_member(n, out, child, "size");
+        written_bytes += sdsl::write_member(front, out, child, "front");
+        written_bytes += sdsl::write_member(back, out, child, "back");
+        written_bytes += sdsl::write_member(total_bits_corrections, out, child, "total_bits_corrections");
+        written_bytes += corrections.serialize(out, child, "corrections");
+        written_bytes += sdsl::write_member(segments.size(), out, child, "segments_size");
+        for (auto &s: segments) {
+            out.write((char *) &s, sizeof(segment));
+            written_bytes += sizeof(segment);
+        }
+        sdsl::structure_tree::add_size(child, written_bytes);
+        written_bytes += top_level.serialize(out, child, "top_level");
+        return written_bytes;
+    }
+
+    /**
+     * Loads the vector from a stream.
+     * @param in input stream
+     */
+    void load(std::istream &in) {
+        sdsl::read_member(n, in);
+        sdsl::read_member(front, in);
+        sdsl::read_member(back, in);
+        sdsl::read_member(total_bits_corrections, in);
+        corrections.load(in);
+        size_t segments_size;
+        sdsl::read_member(segments_size, in);
+        segments = std::vector<segment>();
+        segments.reserve(segments_size + 1);
+        for (size_t i = 0; i < segments_size; ++i) {
+            segment s;
+            in.read((char *) &s, sizeof(segment));
+            segments.push_back(s);
+        }
+        segments[segments.size()] = segment(n);
+        top_level.load(in, segments.begin(), segments.end());
+    }
+
+private:
 
     struct canonical_segment_bpc : canonical_segment {
         uint8_t bpc;
@@ -169,300 +461,6 @@ private:
             push_segment(cs, bpc, corrections_offset, data, i, half);
             push_segment(cs.copy(half), bpc, corrections_offset + half * bpc, data, half, j);
         }
-    }
-
-public:
-    la_vector() = default;
-
-    explicit la_vector(std::vector<K> &data) : la_vector(data.begin(), data.end()) {};
-
-    template<class RandomIt>
-    la_vector(RandomIt begin, RandomIt end)
-        : front(*begin),
-          back(*std::prev(end)),
-          n(std::distance(begin, end)),
-          total_bits_corrections(),
-          segments() {
-        if (n == 0)
-            return;
-
-        auto[canonical_segments, bit_size] = make_segmentation(begin, end);
-        total_bits_corrections = bit_size;
-
-        // Store segments and fill the corrections array
-        segments.reserve(canonical_segments.size() + 1);
-        corrections = decltype(corrections)(CEIL_UINT_DIV(total_bits_corrections, 64) + 1, 0);
-
-        size_t corrections_offset = 0;
-        for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
-            auto i = it->get_first_x();
-            auto j = std::next(it) != canonical_segments.end() ? std::next(it)->get_first_x() : n;
-            uint8_t bpc = t_bpc;
-            if constexpr (auto_bpc)
-                bpc = it->bpc;
-            push_segment(*it, bpc, corrections_offset, begin, i, j);
-            corrections_offset += bpc * (j - i);
-        }
-
-        segments.reserve(segments.size() + 1);
-        segments[segments.size()] = segment(n); // extra segment to avoid bound checking in decode() and lower_bound()
-        top_level = decltype(top_level)(begin, end, segments.begin(), segments.end());
-    }
-
-    /**
-     * Returns the element at the specified position. No bounds checking is performed.
-     * @param i position of the element to return
-     * @return the element at the specified position
-     */
-    K operator[](size_t i) const {
-        assert(i < n);
-        return top_level.segment_for_position(i)->decompress(corrections.data(), n, i);
-    }
-
-    /**
-     * Returns an iterator pointing to the first element that is not less than the given value.
-     * @param value value to compare the elements to
-     * @return an iterator pointing to the first element that is not less than value
-     */
-    la_iterator lower_bound(K value) const {
-        if (value > back)
-            return end();
-        if (value <= front)
-            return begin();
-
-        auto it = top_level.segment_for_value(value);
-        auto &s = *it;
-        auto &t = *std::next(it);
-        auto[pos, bound] = s.approximate_position(value);
-        pos = std::clamp(pos, s.first, t.first - 1);
-
-        auto lo = pos <= bound + s.first ? s.first : pos - bound;
-        auto hi = std::min(pos + bound + 1, t.first);
-
-        if (!auto_bpc) {
-            // Binary search on the samples
-            auto sample_lo = CEIL_UINT_DIV(lo, extraction_density);
-            auto sample_hi = (hi - 1) / extraction_density + 1;
-
-            while (sample_lo < sample_hi) {
-                size_t mid = sample_lo + (sample_hi - sample_lo) / 2;
-                if (s.decompress(corrections.data(), n, mid * extraction_density) < value) {
-                    sample_lo = mid + 1;
-                    lo = mid * extraction_density;
-                } else {
-                    sample_hi = mid;
-                    hi = mid * extraction_density;
-                }
-            }
-
-            // Binary search on the compressed data
-            while (lo < hi) {
-                auto mid = lo + (hi - lo) / 2;
-                if (s.decompress(corrections.data(), n, mid) < value)
-                    lo = mid + 1;
-                else
-                    hi = mid;
-            }
-
-            if (lo == t.first)
-                return la_iterator(this, t.first, std::next(it));
-            return la_iterator(this, lo, it);
-        }
-
-        auto val = s.decompress(corrections.data(), n, pos);
-        auto search_forward = val <= value;
-        constexpr auto linear_threshold = 2 * cache_line_bits / (auto_bpc ? 4 : t_bpc);
-
-        if (hi - lo <= linear_threshold) {
-            if (search_forward)
-                while (pos < t.first && val < value)
-                    val = s.decompress(corrections.data(), n, ++pos);
-            else
-                while (pos > s.first && s.decompress(corrections.data(), n, pos - 1) >= value)
-                    --pos;
-
-            if (pos == t.first)
-                return la_iterator(this, t.first, std::next(it));
-            return la_iterator(this, pos, it);
-        }
-
-        lo = search_forward ? pos : lo;
-        hi = search_forward ? hi : pos;
-        auto val_at_lo = search_forward ? val : s.decompress(corrections.data(), n, lo);
-        auto val_at_hi = search_forward ? s.decompress(corrections.data(), n, hi - 1) : val;
-        auto count = hi - lo;
-
-        if (hi == t.first and value > val_at_hi)
-            return la_iterator(this, t.first, std::next(it));
-
-        while (count > linear_threshold) {
-            auto x = larger_signed_key_type(value) - val_at_lo;
-            auto dx = val_at_hi - val_at_lo;
-            auto dy = count - 1;
-            auto step = x * dy / dx;
-            auto p = lo + step;
-            auto val_at_p = s.decompress(corrections.data(), n, p);
-
-            if (value > val_at_p) {
-                lo = p + 1;
-                count -= step + 1;
-                val_at_lo = s.decompress(corrections.data(), n, lo);
-                if (val_at_lo >= value) {
-                    if (lo == t.first)
-                        return la_iterator(this, t.first, std::next(it));
-                    return la_iterator(this, lo, it);
-                }
-            } else {
-                hi = p;
-                count = step;
-                val_at_hi = val_at_p;
-            }
-        }
-
-        for (; lo < hi && s.decompress(corrections.data(), n, lo) < value; ++lo);
-
-        if (lo == t.first)
-            return la_iterator(this, t.first, std::next(it));
-        return la_iterator(this, lo, it);
-    }
-
-    /**
-     * Returns the number of elements in the container that are less than or equal to @p value.
-     * @param value value to compare elements to
-     * @return the number of elements that are less than or equal to @p value
-     */
-    size_t rank(K value) const {
-        return std::distance(begin(), lower_bound(value));
-    }
-
-    /**
-     * Returns the i-th smallest element in the container.
-     * @param i rank of the element, must be between 1 and @ref size()
-     * @return the i-th smallest element
-     */
-    K select(size_t i) const {
-        assert(i > 0 && i <= n);
-        return operator[](i - 1);
-    }
-
-    /**
-     * Decodes all the elements of this container into the memory beginning at @p out. The caller is responsible for
-     * allocating enough memory for @p out, that is, at least @ref size() * sizeof(K) bytes.
-     * @param out the beginning of the destination of the decoded elements
-     */
-    void decode(K *out) const {
-        for (auto it = segments.begin(); it != segments.end(); ++it) {
-            auto &s = *it;
-            auto covered = std::next(it)->first - s.first;
-            auto significand = s.slope_significand;
-            auto exponent = s.slope_exponent;
-            auto intercept = s.intercept - BPC_TO_EPSILON(s.bpc);
-
-            #pragma omp simd
-            for (auto j = 0; j < covered; ++j)
-                out[j] = ((j * significand) >> exponent) + intercept;
-
-            for (auto j = 0; j < covered; ++j)
-                out[j] += s.get_correction(corrections.data(), n, j + s.first);
-
-            out += covered;
-        }
-    }
-
-    /**
-     * Decodes all the elements of this container into a vector.
-     * @return a vector with the decoded elements
-     */
-    std::vector<K> decode() const {
-        std::vector<K> out(n);
-        decode(out.data());
-        return out;
-    }
-
-    /**
-     * Returns an iterator to the first element.
-     * @return an iterator to the first element
-     */
-    iterator begin() const { return la_iterator(this, 0, segments.begin()); }
-
-    /**
-     * Returns an iterator to the element following the last element.
-     * @return an iterator to the element following the last element
-     */
-    iterator end() const { return la_iterator(this, n, segments.end()); }
-
-    /**
-     * Returns the number of bytes used by this container to encode its elements.
-     * @return the size in bytes of this container
-     */
-    size_t size_in_bytes() const {
-        return total_bits_corrections / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
-    }
-
-    /**
-     * Returns the number of segments (linear models) used in this container to encode its elements.
-     * @return the number of segments in this container
-     */
-    size_t segments_count() const { return segments.size(); }
-
-    /**
-     * Returns the average number of bits per element, that is, @ref size_in_bytes() * 8. / @ref size().
-     * @return the average number of bits per element
-     */
-    double bits_per_element() const { return size_in_bytes() * CHAR_BIT / (double) n; }
-
-    /**
-     * Returns the number of elements in this container.
-     * @return the number of elements in this container
-     */
-    size_t size() const { return n; }
-
-    /**
-     * Serializes the vector to a stream.
-     * @param out output stream
-     * @param v parent node in the structure tree
-     * @param name name of the structure tree node
-     * @return the number of bytes written to out
-     */
-    size_t serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, std::string name = "") const {
-        auto child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
-        size_t written_bytes = 0;
-        written_bytes += sdsl::write_member(n, out, child, "size");
-        written_bytes += sdsl::write_member(front, out, child, "front");
-        written_bytes += sdsl::write_member(back, out, child, "back");
-        written_bytes += sdsl::write_member(total_bits_corrections, out, child, "total_bits_corrections");
-        written_bytes += corrections.serialize(out, child, "corrections");
-        written_bytes += sdsl::write_member(segments.size(), out, child, "segments_size");
-        for (auto &s: segments) {
-            out.write((char *) &s, sizeof(segment));
-            written_bytes += sizeof(segment);
-        }
-        sdsl::structure_tree::add_size(child, written_bytes);
-        written_bytes += top_level.serialize(out, child, "top_level");
-        return written_bytes;
-    }
-
-    /**
-     * Loads the vector from a stream.
-     * @param in input stream
-     */
-    void load(std::istream &in) {
-        sdsl::read_member(n, in);
-        sdsl::read_member(front, in);
-        sdsl::read_member(back, in);
-        sdsl::read_member(total_bits_corrections, in);
-        corrections.load(in);
-        size_t segments_size;
-        sdsl::read_member(segments_size, in);
-        segments = std::vector<segment>();
-        segments.reserve(segments_size + 1);
-        for (size_t i = 0; i < segments_size; ++i) {
-            segment s;
-            in.read((char *) &s, sizeof(segment));
-            segments.push_back(s);
-        }
-        segments[segments.size()] = segment(n);
-        top_level.load(in, segments.begin());
     }
 };
 
@@ -755,7 +753,7 @@ public:
      * @param name name of the structure tree node
      * @return the number of bytes written to out
      */
-    size_t serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, std::string name = "") const {
+    size_t serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, const std::string &name = "") const {
         auto child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
         size_t written_bytes = 0;
         written_bytes += sdsl::write_member(val_step, out, child, "val_step");
@@ -770,8 +768,8 @@ public:
      * Loads the top-level structure from a stream.
      * @param in input stream
      */
-    void load(std::istream &in, t_segments_iterator segments) {
-        segments_begin = segments;
+    void load(std::istream &in, t_segments_iterator first, t_segments_iterator) {
+        segments_begin = first;
         sdsl::read_member(val_step, in);
         sdsl::read_member(pos_step, in);
         sdsl::read_member(top_level_size, in);
