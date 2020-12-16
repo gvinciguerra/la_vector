@@ -35,20 +35,10 @@
 /** Computes the number of bits needed to store x, that is, 0 if x is 0, 1 + floor(log2(x)) otherwise. */
 #define BIT_WIDTH(x) ((x) == 0 ? 0 : 64 - __builtin_clzll(x))
 
-template<class ForwardIt, class T, class Compare = std::less<T>>
-ForwardIt upper_bound_branchless(ForwardIt first, ForwardIt last, const T &value, Compare comp = Compare()) {
-    auto n = std::distance(first, last);
-    while (n > 1) {
-        auto half = n / 2;
-        __builtin_prefetch(&*first + half / 2, 0, 0);
-        __builtin_prefetch(&*first + half + half / 2, 0, 0);
-        first = !comp(value, *std::next(first, half)) ? first + half : first;
-        n -= half;
-    }
-    return std::next(first, !comp(value, *first));
-}
+template<typename K, typename t_segments_iterator>
+class bucketing_top_level;
 
-template<typename K, uint8_t t_bpc = 0>
+template<typename K, uint8_t t_bpc = 0, template<class, class> class t_top_level = bucketing_top_level>
 class la_vector {
     static_assert(std::is_integral_v<K>);
     static_assert(std::is_unsigned_v<K>);
@@ -63,6 +53,7 @@ class la_vector {
     using position_type = typename std::conditional_t<sizeof(K) <= 4, uint32_t, uint64_t>;
     using signed_position_type = typename std::make_signed_t<position_type>;
     using larger_signed_key_type = typename std::conditional_t<sizeof(K) <= 4, int64_t, __int128>;
+    using top_level_type = t_top_level<K, typename std::vector<segment>::const_iterator>;
 
 public:
     using size_type = size_t;
@@ -82,14 +73,10 @@ private:
     K front;                          ///< The first element in this container.
     K back;                           ///< The last element in this container.
     size_t n;                         ///< The number of elements in this container.
-    size_t val_step;                  ///< The chunk size of val_top_level, in terms of universe values 0,...,back.
-    size_t pos_step;                  ///< The chunk size of pos_top_level, in terms of positions 0,...,n.
-    size_t top_level_size;            ///< The size of the two *_top_level structures.
     size_t total_bits_corrections;    ///< The number of bits needed to store the corrections.
     std::vector<segment> segments;    ///< The linear models that, together with the corrections, compress the data.
     sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
-    sdsl::int_vector<> val_top_level; ///< Used to speed up segment_for_value, contains positions of segments.
-    sdsl::int_vector<> pos_top_level; ///< Used to speed up segment_for_position, contains positions of segments.
+    top_level_type top_level;         ///< The top level structure on the segments.
 
     using canonical_segment = typename OptimalPiecewiseLinearModel<position_type, K>::CanonicalSegment;
     using base_segment_type = typename std::conditional_t<auto_bpc, variable_bpc, constant_bpc>;
@@ -99,34 +86,6 @@ private:
         canonical_segment_bpc() = default;
         canonical_segment_bpc(const canonical_segment &cs, uint8_t bpc) : canonical_segment(cs), bpc(bpc) {};
     };
-
-    /**
-     * Returns an iterator to the segment responsible for decompressing the element at the given position.
-     * @param i position of the element
-     * @return an iterator to the segment responsible for the given position
-     */
-    typename decltype(segments)::const_iterator segment_for_position(size_t i) const {
-        auto k = i / pos_step;
-        auto first = segments.begin() + (i < pos_step ? 0 : pos_top_level[k - 1]);
-        auto last = segments.begin() + pos_top_level[k];
-        auto cmp = [](size_t x, const segment &s) { return x < s.first; };
-        return std::prev(upper_bound_branchless(first, last, i, cmp));
-    }
-
-    /**
-     * Returns an iterator to the segment responsible for decompressing an element that is not less than the given
-     * value.
-     * @param value value of the element
-     * @return an iterator to the segment responsible for the given value
-     */
-    typename decltype(segments)::const_iterator segment_for_value(K value) const {
-        auto k = value / val_step;
-        auto first = segments.begin() + (value < val_step ? 0 : val_top_level[k - 1]);
-        auto last = segments.begin() + val_top_level[k];
-        auto cmp = [](K x, const segment &s) { return x < s.first_key(); };
-        auto it = upper_bound_branchless(first, last, value, cmp);
-        return it == segments.begin() ? it : std::prev(it);
-    }
 
     template<typename RandomIt, bool Enable = !auto_bpc, typename std::enable_if_t<Enable, int> = 0>
     static std::pair<std::vector<canonical_segment>, size_t> make_segmentation(RandomIt begin, RandomIt end) {
@@ -198,19 +157,6 @@ private:
         return {out, bit_size};
     }
 
-    template<typename F>
-    void fill_top_level(sdsl::int_vector<> &iv, size_t size, uint64_t step, F op) {
-        if (step == 0)
-            return;
-
-        iv = sdsl::int_vector<>(size, segments.size(), BIT_WIDTH(segments.size()));
-        for (auto i = 0, k = 0; i < size - 1; ++i) {
-            while (k < segments.size() && op(segments[k]) < (i + 1) * step)
-                ++k;
-            iv[i] = k;
-        }
-    }
-
     template<class RandomIt>
     void push_segment(const canonical_segment &cs, uint8_t bpc, position_type corrections_offset,
                       RandomIt data, size_t i, size_t j) {
@@ -260,14 +206,7 @@ public:
 
         segments.reserve(segments.size() + 1);
         segments[segments.size()] = segment(n); // extra segment to avoid bound checking in decode() and lower_bound()
-
-        // Fill the top-level structures
-        top_level_size = std::min(1u << 16, BIT_CEIL(segments.size()));
-        auto u = *std::prev(end);
-        val_step = CEIL_UINT_DIV(u, top_level_size);
-        pos_step = CEIL_UINT_DIV(n, top_level_size);
-        fill_top_level(val_top_level, top_level_size, val_step, [begin](const segment &s) { return begin[s.first]; });
-        fill_top_level(pos_top_level, top_level_size, pos_step, [](const segment &s) { return s.first; });
+        top_level = decltype(top_level)(begin, end, segments.begin(), segments.end());
     }
 
     /**
@@ -277,7 +216,7 @@ public:
      */
     K operator[](size_t i) const {
         assert(i < n);
-        return segment_for_position(i)->decompress(corrections.data(), n, i);
+        return top_level.segment_for_position(i)->decompress(corrections.data(), n, i);
     }
 
     /**
@@ -291,7 +230,7 @@ public:
         if (value <= front)
             return begin();
 
-        auto it = segment_for_value(value);
+        auto it = top_level.segment_for_value(value);
         auto &s = *it;
         auto &t = *std::next(it);
         auto[pos, bound] = s.approximate_position(value);
@@ -444,50 +383,39 @@ public:
      * Returns an iterator to the first element.
      * @return an iterator to the first element
      */
-    iterator begin() const {
-        return la_iterator(this, 0, segments.begin());
-    }
+    iterator begin() const { return la_iterator(this, 0, segments.begin()); }
 
     /**
      * Returns an iterator to the element following the last element.
      * @return an iterator to the element following the last element
      */
-    iterator end() const {
-        return la_iterator(this, n, segments.end());
-    }
+    iterator end() const { return la_iterator(this, n, segments.end()); }
 
     /**
      * Returns the number of bytes used by this container to encode its elements.
      * @return the size in bytes of this container
      */
     size_t size_in_bytes() const {
-        return total_bits_corrections / CHAR_BIT + segments_count() * sizeof(segment)
-            + (val_top_level.bit_size() + pos_top_level.bit_size()) / CHAR_BIT;
+        return total_bits_corrections / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
     }
 
     /**
      * Returns the number of segments (linear models) used in this container to encode its elements.
      * @return the number of segments in this container
      */
-    size_t segments_count() const {
-        return segments.size();
-    }
+    size_t segments_count() const { return segments.size(); }
 
     /**
      * Returns the average number of bits per element, that is, @ref size_in_bytes() * 8. / @ref size().
      * @return the average number of bits per element
      */
-    double bits_per_element() const {
-        return size_in_bytes() * CHAR_BIT / (double) n;
-    }
+    double bits_per_element() const { return size_in_bytes() * CHAR_BIT / (double) n; }
 
     /**
      * Returns the number of elements in this container.
      * @return the number of elements in this container
      */
-    size_t size() const {
-        return n;
-    }
+    size_t size() const { return n; }
 
     /**
      * Serializes the vector to a stream.
@@ -502,19 +430,15 @@ public:
         written_bytes += sdsl::write_member(n, out, child, "size");
         written_bytes += sdsl::write_member(front, out, child, "front");
         written_bytes += sdsl::write_member(back, out, child, "back");
-        written_bytes += sdsl::write_member(val_step, out, child, "val_step");
-        written_bytes += sdsl::write_member(pos_step, out, child, "pos_step");
-        written_bytes += sdsl::write_member(top_level_size, out, child, "top_level_size");
         written_bytes += sdsl::write_member(total_bits_corrections, out, child, "total_bits_corrections");
         written_bytes += corrections.serialize(out, child, "corrections");
-        written_bytes += val_top_level.serialize(out, child, "val_top_level");
-        written_bytes += pos_top_level.serialize(out, child, "pos_top_level");
         written_bytes += sdsl::write_member(segments.size(), out, child, "segments_size");
         for (auto &s: segments) {
             out.write((char *) &s, sizeof(segment));
             written_bytes += sizeof(segment);
         }
         sdsl::structure_tree::add_size(child, written_bytes);
+        written_bytes += top_level.serialize(out, child, "top_level");
         return written_bytes;
     }
 
@@ -526,13 +450,8 @@ public:
         sdsl::read_member(n, in);
         sdsl::read_member(front, in);
         sdsl::read_member(back, in);
-        sdsl::read_member(val_step, in);
-        sdsl::read_member(pos_step, in);
-        sdsl::read_member(top_level_size, in);
         sdsl::read_member(total_bits_corrections, in);
         corrections.load(in);
-        val_top_level.load(in);
-        pos_top_level.load(in);
         size_t segments_size;
         sdsl::read_member(segments_size, in);
         segments = std::vector<segment>();
@@ -543,21 +462,22 @@ public:
             segments.push_back(s);
         }
         segments[segments.size()] = segment(n);
+        top_level.load(in, segments.begin());
     }
 };
 
 #pragma pack(push, 1)
 
-template<typename K, uint8_t t_bpc>
-struct la_vector<K, t_bpc>::constant_bpc {
+template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
+struct la_vector<K, t_bpc, t_top_level>::constant_bpc {
     static constexpr uint8_t bpc = t_bpc;
     uint32_t first_correction: t_bpc;
     constant_bpc() = default;
     constant_bpc(uint8_t, position_type) : first_correction(0) {};
 };
 
-template<typename K, uint8_t t_bpc>
-struct la_vector<K, t_bpc>::variable_bpc {
+template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
+struct la_vector<K, t_bpc, t_top_level>::variable_bpc {
     uint8_t bpc;
     position_type corrections_offset;
     uint32_t first_correction: 16;
@@ -565,8 +485,8 @@ struct la_vector<K, t_bpc>::variable_bpc {
     variable_bpc(uint8_t bpc, position_type offset) : bpc(bpc), corrections_offset(offset), first_correction(0) {};
 };
 
-template<typename K, uint8_t t_bpc>
-struct la_vector<K, t_bpc>::segment : base_segment_type {
+template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
+struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
     static constexpr auto exponent_bits = 5;
     static constexpr auto significand_bits = sizeof(K) <= 4 ? 32 - exponent_bits : 56 - exponent_bits;
     position_type first;
@@ -657,8 +577,8 @@ struct la_vector<K, t_bpc>::segment : base_segment_type {
 
 #pragma pack(pop)
 
-template<typename K, uint8_t t_bpc>
-class la_vector<K, t_bpc>::la_iterator {
+template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
+class la_vector<K, t_bpc, t_top_level>::la_iterator {
     using parent_type = const la_vector<K, t_bpc>;
     using segments_iterator = typename decltype(parent_type::segments)::const_iterator;
 
@@ -670,7 +590,7 @@ class la_vector<K, t_bpc>::la_iterator {
     void move_segment_cursor() {
         bool is_segment_cursor_invalid = s_it == p->segments.end();
         if (is_segment_cursor_invalid) {
-            s_it = p->segment_for_position(i);
+            s_it = p->top_level.segment_for_position(i);
             return;
         }
 
@@ -749,4 +669,119 @@ public:
     bool operator>=(const la_iterator &r) const { return i >= r.i; }
     bool operator!=(const la_iterator &r) const { return i != r.i; }
     bool operator==(const la_iterator &r) const { return i == r.i; }
+};
+
+template<class ForwardIt, class T, class Compare = std::less<T>>
+ForwardIt upper_bound_branchless(ForwardIt first, ForwardIt last, const T &value, Compare comp = Compare()) {
+    auto n = std::distance(first, last);
+    while (n > 1) {
+        auto half = n / 2;
+        __builtin_prefetch(&*first + half / 2, 0, 0);
+        __builtin_prefetch(&*first + half + half / 2, 0, 0);
+        first = !comp(value, *std::next(first, half)) ? first + half : first;
+        n -= half;
+    }
+    return std::next(first, !comp(value, *first));
+}
+
+template<typename K, typename t_segments_iterator>
+class bucketing_top_level {
+    size_t val_step;                    ///< The chunk size of val_top_level, in terms of universe values 0,...,back.
+    size_t pos_step;                    ///< The chunk size of pos_top_level, in terms of positions 0,...,n.
+    size_t top_level_size;              ///< The number of elements in the two *_top_level structures.
+    sdsl::int_vector<> val_top_level;   ///< Used to speed up segment_for_value, contains positions of segments.
+    sdsl::int_vector<> pos_top_level;   ///< Used to speed up segment_for_position, contains positions of segments.
+    t_segments_iterator segments_begin; ///< An iterator to the first segment.
+
+public:
+
+    bucketing_top_level() = default;
+
+    template<typename It>
+    bucketing_top_level(It first, It last, t_segments_iterator first_segment, t_segments_iterator last_segment) {
+        auto n_segments = std::distance(first_segment, last_segment);
+        auto n = std::distance(first, last);
+        auto u = *std::prev(last);
+
+        segments_begin = first_segment;
+        top_level_size = std::min(1u << 16, BIT_CEIL(n_segments));
+        val_step = CEIL_UINT_DIV(u, top_level_size);
+        pos_step = CEIL_UINT_DIV(n, top_level_size);
+        val_top_level = sdsl::int_vector<>(top_level_size, n_segments, BIT_WIDTH(n_segments));
+        pos_top_level = sdsl::int_vector<>(top_level_size, n_segments, BIT_WIDTH(n_segments));
+
+        for (auto i = 0, j = 0, k = 0; i < top_level_size - 1; ++i) {
+            while (j < n_segments && first[first_segment[j].first] < (i + 1) * val_step)
+                ++j;
+            while (k < n_segments && first_segment[k].first < (i + 1) * pos_step)
+                ++k;
+            val_top_level[i] = j;
+            pos_top_level[i] = k;
+        }
+    }
+
+    /**
+      * Returns an iterator to the segment responsible for decompressing the element at the given position.
+      * @param i position of the element
+      * @return an iterator to the segment responsible for the given position
+      */
+    t_segments_iterator segment_for_position(size_t i) const {
+        auto k = i / pos_step;
+        auto first = segments_begin + (i < pos_step ? 0 : pos_top_level[k - 1]);
+        auto last = segments_begin + pos_top_level[k];
+        auto cmp = [](size_t x, const auto &s) { return x < s.first; };
+        return std::prev(upper_bound_branchless(first, last, i, cmp));
+    }
+
+    /**
+     * Returns an iterator to the segment responsible for decompressing an element that is not less than the given
+     * value.
+     * @param value value of the element
+     * @return an iterator to the segment responsible for the given value
+     */
+    t_segments_iterator segment_for_value(K value) const {
+        auto k = value / val_step;
+        auto first = segments_begin + (value < val_step ? 0 : val_top_level[k - 1]);
+        auto last = segments_begin + val_top_level[k];
+        auto cmp = [](K x, const auto &s) { return x < s.first_key(); };
+        auto it = upper_bound_branchless(first, last, value, cmp);
+        return it == segments_begin ? it : std::prev(it);
+    }
+
+    /**
+     * Serializes the top-level structure to a stream.
+     * @param out output stream
+     * @param v parent node in the structure tree
+     * @param name name of the structure tree node
+     * @return the number of bytes written to out
+     */
+    size_t serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, std::string name = "") const {
+        auto child = sdsl::structure_tree::add_child(v, name, sdsl::util::class_name(*this));
+        size_t written_bytes = 0;
+        written_bytes += sdsl::write_member(val_step, out, child, "val_step");
+        written_bytes += sdsl::write_member(pos_step, out, child, "pos_step");
+        written_bytes += sdsl::write_member(top_level_size, out, child, "top_level_size");
+        written_bytes += val_top_level.serialize(out, child, "val_top_level");
+        written_bytes += pos_top_level.serialize(out, child, "pos_top_level");
+        return written_bytes;
+    }
+
+    /**
+     * Loads the top-level structure from a stream.
+     * @param in input stream
+     */
+    void load(std::istream &in, t_segments_iterator segments) {
+        segments_begin = segments;
+        sdsl::read_member(val_step, in);
+        sdsl::read_member(pos_step, in);
+        sdsl::read_member(top_level_size, in);
+        val_top_level.load(in);
+        pos_top_level.load(in);
+    }
+
+    /**
+     * Returns the number of bytes used by this top-level structure.
+     * @return the size in bytes of this top-level structure
+     */
+    size_t size_in_bytes() const { return (val_top_level.bit_size() + pos_top_level.bit_size()) / CHAR_BIT; }
 };
