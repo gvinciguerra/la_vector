@@ -569,7 +569,7 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
 
 template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 class la_vector<K, t_bpc, t_top_level>::la_iterator {
-    using parent_type = const la_vector<K, t_bpc>;
+    using parent_type = const la_vector<K, t_bpc, t_top_level>;
     using segments_iterator = typename decltype(parent_type::segments)::const_iterator;
 
     parent_type *p;
