@@ -33,6 +33,7 @@ TEMPLATE_TEST_CASE_SIG("Iterator", "", TEMPLATE_ARGS) {
     la_vector<T, B> v(data.begin(), data.end());
     for (auto it = v.begin(); it != v.end(); ++it)
         REQUIRE(data[i++] == *it);
+    REQUIRE(i == data.size());
 }
 
 TEMPLATE_TEST_CASE_SIG("Select", "", TEMPLATE_ARGS) {

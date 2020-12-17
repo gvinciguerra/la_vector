@@ -112,9 +112,8 @@ public:
             corrections_offset += bpc * (j - i);
         }
 
-        segments.reserve(segments.size() + 1);
-        segments[segments.size()] = segment(n); // extra segment to avoid bound checking in decode() and lower_bound()
-        top_level = decltype(top_level)(begin, end, segments.begin(), segments.end());
+        segments.emplace_back(n); // extra segment to avoid bound checking in decode() and lower_bound()
+        top_level = decltype(top_level)(begin, end, segments.begin(), std::prev(segments.end()));
     }
 
     /**
@@ -257,7 +256,7 @@ public:
      * @param out the beginning of the destination of the decoded elements
      */
     void decode(K *out) const {
-        for (auto it = segments.begin(); it != segments.end(); ++it) {
+        for (auto it = segments.begin(); it != std::prev(segments.end()); ++it) {
             auto &s = *it;
             auto covered = std::next(it)->first - s.first;
             auto significand = s.slope_significand;
@@ -337,14 +336,11 @@ public:
         written_bytes += sdsl::write_member(front, out, child, "front");
         written_bytes += sdsl::write_member(back, out, child, "back");
         written_bytes += sdsl::write_member(total_bits_corrections, out, child, "total_bits_corrections");
-        written_bytes += corrections.serialize(out, child, "corrections");
-        written_bytes += sdsl::write_member(segments.size(), out, child, "segments_size");
-        for (auto &s: segments) {
-            out.write((char *) &s, sizeof(segment));
-            written_bytes += sizeof(segment);
-        }
+        written_bytes += sdsl::write_member(segments.size(), out, child, "segments.size()");
+        written_bytes += sdsl::serialize_vector(segments, out, child, "segments");
+        written_bytes += sdsl::serialize(top_level, out, child, "top_level");
+        written_bytes += sdsl::serialize(corrections, out, child, "corrections");
         sdsl::structure_tree::add_size(child, written_bytes);
-        written_bytes += top_level.serialize(out, child, "top_level");
         return written_bytes;
     }
 
@@ -357,18 +353,12 @@ public:
         sdsl::read_member(front, in);
         sdsl::read_member(back, in);
         sdsl::read_member(total_bits_corrections, in);
-        corrections.load(in);
         size_t segments_size;
         sdsl::read_member(segments_size, in);
-        segments = std::vector<segment>();
-        segments.reserve(segments_size + 1);
-        for (size_t i = 0; i < segments_size; ++i) {
-            segment s;
-            in.read((char *) &s, sizeof(segment));
-            segments.push_back(s);
-        }
-        segments[segments.size()] = segment(n);
-        top_level.load(in, segments.begin(), segments.end());
+        segments = decltype(segments)(segments_size);
+        sdsl::load_vector(segments, in);
+        top_level.load(in, segments.begin(), std::prev(segments.end()));
+        sdsl::load(corrections, in);
     }
 
 private:
@@ -485,6 +475,7 @@ struct la_vector<K, t_bpc, t_top_level>::variable_bpc {
 
 template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
+    using size_type = size_t;
     static constexpr auto exponent_bits = 5;
     static constexpr auto significand_bits = sizeof(K) <= 4 ? 32 - exponent_bits : 56 - exponent_bits;
     position_type first;
@@ -571,6 +562,12 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
         auto correction = get_correction(corrections, n, i);
         return approximate(i) + correction - epsilon;
     }
+
+    size_t serialize(std::ostream &out, sdsl::structure_tree_node *v = nullptr, const std::string &name = "") const {
+        return sdsl::write_member(*this, out, v, name);
+    }
+
+    void load(std::istream &in) { sdsl::read_member(*this, in); }
 };
 
 #pragma pack(pop)
@@ -693,6 +690,8 @@ class bucketing_top_level {
 
 public:
 
+    using size_type = size_t;
+
     bucketing_top_level() = default;
 
     template<typename It>
@@ -758,9 +757,10 @@ public:
         size_t written_bytes = 0;
         written_bytes += sdsl::write_member(val_step, out, child, "val_step");
         written_bytes += sdsl::write_member(pos_step, out, child, "pos_step");
-        written_bytes += sdsl::write_member(top_level_size, out, child, "top_level_size");
-        written_bytes += val_top_level.serialize(out, child, "val_top_level");
-        written_bytes += pos_top_level.serialize(out, child, "pos_top_level");
+        written_bytes += sdsl::write_member(top_level_size, out, child, "top_level.size()");
+        written_bytes += sdsl::serialize(val_top_level, out, child, "val_top_level");
+        written_bytes += sdsl::serialize(pos_top_level, out, child, "pos_top_level");
+        sdsl::structure_tree::add_size(child, written_bytes);
         return written_bytes;
     }
 
@@ -773,8 +773,8 @@ public:
         sdsl::read_member(val_step, in);
         sdsl::read_member(pos_step, in);
         sdsl::read_member(top_level_size, in);
-        val_top_level.load(in);
-        pos_top_level.load(in);
+        sdsl::load(val_top_level, in);
+        sdsl::load(pos_top_level, in);
     }
 
     /**
