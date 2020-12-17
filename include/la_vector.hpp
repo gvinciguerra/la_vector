@@ -70,7 +70,6 @@ class la_vector {
     K front;                          ///< The first element in this container.
     K back;                           ///< The last element in this container.
     size_t n;                         ///< The number of elements in this container.
-    size_t total_bits_corrections;    ///< The number of bits needed to store the corrections.
     std::vector<segment> segments;    ///< The linear models that, together with the corrections, compress the data.
     sdsl::int_vector<64> corrections; ///< The corrections for each compressed element.
     top_level_type top_level;         ///< The top level structure on the segments.
@@ -89,17 +88,15 @@ public:
         : front(*begin),
           back(*std::prev(end)),
           n(std::distance(begin, end)),
-          total_bits_corrections(),
           segments() {
         if (n == 0)
             return;
 
         auto[canonical_segments, bit_size] = make_segmentation(begin, end);
-        total_bits_corrections = bit_size;
 
         // Store segments and fill the corrections array
         segments.reserve(canonical_segments.size() + 1);
-        corrections = decltype(corrections)(CEIL_UINT_DIV(total_bits_corrections, 64) + 1, 0);
+        corrections = decltype(corrections)(CEIL_UINT_DIV(bit_size, 64) + 1, 0);
 
         size_t corrections_offset = 0;
         for (auto it = canonical_segments.begin(); it < canonical_segments.end(); ++it) {
@@ -301,7 +298,7 @@ public:
      * @return the size in bytes of this container
      */
     size_t size_in_bytes() const {
-        return total_bits_corrections / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
+        return corrections.bit_size() / CHAR_BIT + segments_count() * sizeof(segment) + top_level.size_in_bytes();
     }
 
     /**
@@ -335,7 +332,6 @@ public:
         written_bytes += sdsl::write_member(n, out, child, "size");
         written_bytes += sdsl::write_member(front, out, child, "front");
         written_bytes += sdsl::write_member(back, out, child, "back");
-        written_bytes += sdsl::write_member(total_bits_corrections, out, child, "total_bits_corrections");
         written_bytes += sdsl::write_member(segments.size(), out, child, "segments.size()");
         written_bytes += sdsl::serialize_vector(segments, out, child, "segments");
         written_bytes += sdsl::serialize(top_level, out, child, "top_level");
@@ -352,7 +348,6 @@ public:
         sdsl::read_member(n, in);
         sdsl::read_member(front, in);
         sdsl::read_member(back, in);
-        sdsl::read_member(total_bits_corrections, in);
         size_t segments_size;
         sdsl::read_member(segments_size, in);
         segments = decltype(segments)(segments_size);
