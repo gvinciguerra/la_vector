@@ -305,14 +305,14 @@ size_t make_segmentation(size_t n, size_t epsilon, Fin in, Fout out) {
             continue;
         p = next_p;
         if (!opt.add_point(p.first, p.second)) {
-            out(start, i, opt.get_segment());
+            out(opt.get_segment());
             start = i;
             --i;
             ++c;
         }
     }
 
-    out(start, n, opt.get_segment());
+    out(opt.get_segment());
     return ++c;
 }
 
@@ -328,8 +328,7 @@ size_t make_segmentation_par(size_t n, size_t epsilon, Fin in, Fout out) {
     using X = typename std::invoke_result_t<Fin, size_t>::first_type;
     using Y = typename std::invoke_result_t<Fin, size_t>::second_type;
     using canonical_segment = typename OptimalPiecewiseLinearModel<X, Y>::CanonicalSegment;
-    using cs_pair = std::pair<canonical_segment, size_t>;
-    std::vector<std::vector<cs_pair>> results(parallelism);
+    std::vector<std::vector<canonical_segment>> results(parallelism);
 
     #pragma omp parallel for reduction(+:c) num_threads(parallelism)
     for (auto i = 0ull; i < parallelism; ++i) {
@@ -344,18 +343,14 @@ size_t make_segmentation_par(size_t n, size_t epsilon, Fin in, Fout out) {
         }
 
         auto in_fun = [in, first](auto j) { return in(first + j); };
-        auto out_fun = [&results, i, first](auto, auto end, auto cs) { results[i].emplace_back(cs, first + end); };
+        auto out_fun = [&results, i](const auto &cs) { results[i].emplace_back(cs); };
         results[i].reserve(chunk_size / (epsilon > 0 ? epsilon * epsilon : 16));
         c += make_segmentation(last - first, epsilon, in_fun, out_fun);
     }
 
-    size_t start = 0;
-    for (auto &v : results) {
-        for (auto &cs : v) {
-            out(start, cs.second, cs.first);
-            start = cs.second;
-        }
-    }
+    for (auto &v : results)
+        for (auto &cs : v)
+            out(cs);
 
     return c;
 }

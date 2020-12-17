@@ -386,7 +386,7 @@ private:
         std::vector<canonical_segment> out;
         out.reserve(eps > 0 ? n / (eps * eps) : n / 8);
         auto in_fun = [begin](auto i) { return std::pair<position_type, K>(i, begin[i]); };
-        auto out_fun = [&out](auto, auto, auto cs) { out.push_back(cs); };
+        auto out_fun = [&out](auto cs) { out.push_back(cs); };
         make_segmentation_par(n, eps, in_fun, out_fun);
         return {out, n * t_bpc};
     }
