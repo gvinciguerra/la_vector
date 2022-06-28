@@ -778,3 +778,6 @@ public:
      */
     size_t size_in_bytes() const { return (val_top_level.bit_size() + pos_top_level.bit_size()) / CHAR_BIT; }
 };
+
+template<typename K, template<class, class> class t_top_level = bucketing_top_level>
+using la_vector_opt = la_vector<K, 0, t_top_level>;

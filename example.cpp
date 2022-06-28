@@ -14,7 +14,7 @@ int main() {
               << "Bytes: " << v1.size_in_bytes() << std::endl;
 
     // Construct the la_vector by minimising the space
-    la_vector<uint32_t, 0> v2(data);
+    la_vector_opt<uint32_t> v2(data);
     std::cout << "Bytes: " << v2.size_in_bytes() << std::endl;
 
     //
