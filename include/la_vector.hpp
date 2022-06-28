@@ -381,19 +381,20 @@ private:
         const auto n = size_t(std::distance(begin, end));
         const auto max_bpc = (1 + uint8_t(std::log2(begin[n - 1]))) / 2;
 
-        std::vector<size_t> frontier(max_bpc + 1);
+        std::vector<std::pair<size_t, size_t>> frontier(max_bpc + 1);
         std::vector<OptimalPiecewiseLinearModel<position_type, K>> segmentations;
         for (auto bpc = 0; bpc <= max_bpc; ++bpc)
             segmentations.emplace_back(BPC_TO_EPSILON(bpc));
 
         auto advance_frontier = [&](auto bpc, auto target) {
-            if (frontier[bpc] > target)
-                return frontier[bpc];
+            if (frontier[bpc].second > target)
+                return false;
 
-            size_t i;
-            for (i = frontier[bpc]; i < n && segmentations[bpc].add_point(i, begin[i]); ++i)
-                continue;
-            return frontier[bpc] = i;
+            auto &i = frontier[bpc].second;
+            frontier[bpc].first = i;
+            while (i < n && segmentations[bpc].add_point(i, begin[i]))
+                ++i;
+            return true;
         };
 
         // Find the shortest path
@@ -401,19 +402,27 @@ private:
         std::vector<std::unique_ptr<canonical_segment_bpc>> parent(n + 1);
         distance[0] = 0;
 
-        for (size_t i = 0, next_i = -1; i < n; i = next_i, next_i = -1) {
-            // For each j adjacent to i, do a relaxation
+        for (size_t i = 0; i < n; ++i) {
+            // Relax prefix edges (k, i)
             for (uint8_t bpc = 0; bpc <= max_bpc; bpc += 1 + (bpc == 0)) {
-                auto j = advance_frontier(bpc, i);
-                auto weight_ij = bpc * (j - i) + CHAR_BIT * sizeof(segment);
+                if (advance_frontier(bpc, i))
+                    continue; // here k == i so there is no prefix edge
+                auto k = frontier[bpc].first;
+                auto weight_ki = bpc * (i - k) + CHAR_BIT * sizeof(segment);
+                if (distance[i] > distance[k] + weight_ki) {
+                    distance[i] = distance[k] + weight_ki;
+                    parent[i] = std::make_unique<canonical_segment_bpc>(segmentations[bpc].get_segment(), bpc);
+                }
+            }
 
-                // Relax edge (i, j)
+            // Relax suffix edges (i, j)
+            for (uint8_t bpc = 0; bpc <= max_bpc; bpc += 1 + (bpc == 0)) {
+                auto j = frontier[bpc].second;
+                auto weight_ij = bpc * (j - i) + CHAR_BIT * sizeof(segment);
                 if (distance[j] > distance[i] + weight_ij) {
                     distance[j] = distance[i] + weight_ij;
                     parent[j] = std::make_unique<canonical_segment_bpc>(segmentations[bpc].get_segment().copy(i), bpc);
                 }
-
-                next_i = std::min<size_t>(next_i, j);
             }
         }
 

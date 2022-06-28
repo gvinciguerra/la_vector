@@ -16,7 +16,7 @@ std::vector<T> generate_unique(size_t n, int seed = 42) {
     std::mt19937 generator(seed);
     size_t i = 0;
     size_t u = distribution.max() - distribution.min();
-    for (auto k = 0; k < u && i < n; ++k)
+    for (size_t k = 0; k < u && i < n; ++k)
         if (generator() % (u - k) < n - i)
             data[i++] = k + distribution.min();
     return data;
@@ -68,5 +68,14 @@ TEMPLATE_TEST_CASE_SIG("Serialize", "", TEMPLATE_ARGS) {
     la_vector<T, B> v;
     sdsl::load_from_file(v, tmp);
     REQUIRE(data == v.decode());
+
+    auto queries = generate_unique<T>(10000, 8);
+    sdsl::sd_vector<> ef(data.begin(), data.end());
+    sdsl::sd_vector<>::rank_1_type ef_rank;
+    sdsl::util::init_support(ef_rank, &ef);
+
+    for (auto q : queries)
+        REQUIRE(ef_rank(q) == v.rank(q));
+
     std::remove(tmp.c_str());
 }
