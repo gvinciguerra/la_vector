@@ -44,9 +44,9 @@ class la_vector {
     static_assert(std::is_unsigned_v<K>);
     static_assert(t_bpc < sizeof(K) * CHAR_BIT);
 
-    class segment;
-    class constant_bpc;
-    class variable_bpc;
+    struct segment;
+    struct constant_bpc;
+    struct variable_bpc;
     class la_iterator;
     friend class la_iterator;
 
@@ -261,10 +261,10 @@ public:
             auto intercept = s.intercept - BPC_TO_EPSILON(s.bpc);
 
             #pragma omp simd
-            for (auto j = 0; j < covered; ++j)
+            for (size_t j = 0; j < covered; ++j)
                 out[j] = ((j * significand) >> exponent) + intercept;
 
-            for (auto j = 0; j < covered; ++j)
+            for (size_t j = 0; j < covered; ++j)
                 out[j] += s.get_correction(corrections.data(), n, j + s.first);
 
             out += covered;
@@ -505,9 +505,9 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
     explicit segment(position_type first)
         : base_segment_type(0, 0),
           first(first),
-          slope_significand(0),
+          intercept(std::numeric_limits<K>::max()),
           slope_exponent(0),
-          intercept(std::numeric_limits<K>::max()) {}
+          slope_significand(0) {}
 
     size_t get_correction_bit_offset(size_t n, size_t i) const {
         if constexpr (auto_bpc)
@@ -691,7 +691,7 @@ public:
 
     template<typename It>
     bucketing_top_level(It first, It last, t_segments_iterator first_segment, t_segments_iterator last_segment) {
-        auto n_segments = std::distance(first_segment, last_segment);
+        auto n_segments = (size_t) std::distance(first_segment, last_segment);
         auto n = std::distance(first, last);
         auto u = *std::prev(last);
 
@@ -702,7 +702,7 @@ public:
         val_top_level = sdsl::int_vector<>(top_level_size, n_segments, BIT_WIDTH(n_segments));
         pos_top_level = sdsl::int_vector<>(top_level_size, n_segments, BIT_WIDTH(n_segments));
 
-        for (auto i = 0, j = 0, k = 0; i < top_level_size - 1; ++i) {
+        for (size_t i = 0, j = 0, k = 0; i < top_level_size - 1; ++i) {
             while (j < n_segments && first[first_segment[j].first] < (i + 1) * val_step)
                 ++j;
             while (k < n_segments && first_segment[k].first < (i + 1) * pos_step)
