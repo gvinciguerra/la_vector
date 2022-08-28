@@ -92,7 +92,7 @@ public:
         if (n == 0)
             return;
 
-        auto[canonical_segments, bit_size] = make_segmentation(begin, end);
+        auto [canonical_segments, bit_size] = make_segmentation(begin, end);
 
         // Store segments and fill the corrections array
         segments.reserve(canonical_segments.size() + 1);
@@ -105,7 +105,7 @@ public:
             uint8_t bpc = t_bpc;
             if constexpr (auto_bpc)
                 bpc = it->bpc;
-            push_segment(*it, bpc, corrections_offset, begin, i, j);
+            segments.emplace_back(*it, bpc, corrections_offset, begin, n, i, j, corrections.data());
             corrections_offset += bpc * (j - i);
         }
 
@@ -137,11 +137,11 @@ public:
         auto it = top_level.segment_for_value(value);
         auto &s = *it;
         auto &t = *std::next(it);
-        auto[pos, bound] = s.approximate_position(value);
-        pos = std::clamp(pos, s.first, t.first - 1);
+        auto [pos, bound] = s.approximate_position(value);
+        pos = std::clamp<position_type>(pos, s.first, t.first - 1);
 
         auto lo = pos <= bound + s.first ? s.first : pos - bound;
-        auto hi = std::min(pos + bound + 1, t.first);
+        auto hi = std::min<position_type>(pos + bound + 1, t.first);
 
         if (!auto_bpc) {
             // Binary search on the samples
@@ -442,20 +442,6 @@ private:
         std::reverse(out.begin(), out.end());
         return {out, bit_size};
     }
-
-    template<class RandomIt>
-    void push_segment(const canonical_segment &cs, uint8_t bpc, position_type corrections_offset,
-                      RandomIt data, size_t i, size_t j) {
-        try {
-            segment s(cs, bpc, corrections_offset, data, n, i, j, corrections.data());
-            segments.push_back(s);
-        }
-        catch (const std::overflow_error &) {
-            auto half = (i + j) / 2;
-            push_segment(cs, bpc, corrections_offset, data, i, half);
-            push_segment(cs.copy(half), bpc, corrections_offset + half * bpc, data, half, j);
-        }
-    }
 };
 
 #pragma pack(push, 1)
@@ -471,7 +457,7 @@ struct la_vector<K, t_bpc, t_top_level>::constant_bpc {
 template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 struct la_vector<K, t_bpc, t_top_level>::variable_bpc {
     uint8_t bpc;
-    position_type corrections_offset;
+    uint32_t corrections_offset;
     uint32_t first_correction: 16;
     variable_bpc() = default;
     variable_bpc(uint8_t bpc, position_type offset) : bpc(bpc), corrections_offset(offset), first_correction(0) {};
@@ -481,8 +467,8 @@ template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
     using size_type = size_t;
     static constexpr auto exponent_bits = 5;
-    static constexpr auto significand_bits = sizeof(K) <= 4 ? 32 - exponent_bits : 56 - exponent_bits;
-    position_type first;
+    static constexpr auto significand_bits = sizeof(K) <= 4 ? 32 - exponent_bits : 64 - exponent_bits;
+    uint32_t first;
     signed_position_type intercept;
     uint8_t slope_exponent: exponent_bits;
     uint64_t slope_significand: significand_bits;
@@ -494,7 +480,7 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
             RandomIt data, size_t n, size_t i, size_t j, uint64_t *corrections)
         : base_segment_type(bpc, corrections_offset) {
         auto epsilon = BPC_TO_EPSILON(bpc);
-        auto[cs_significand, cs_exponent, cs_intercept] = cs.get_fixed_point_segment(cs.get_first_x(), j - i + 1);
+        auto [cs_significand, cs_exponent, cs_intercept] = cs.get_fixed_point_segment(cs.get_first_x(), j - i + 1);
 
         if (BIT_WIDTH(cs_exponent) > exponent_bits || BIT_WIDTH(cs_significand) > significand_bits)
             throw std::overflow_error("Bit fields' sizes are not large enough");
@@ -514,7 +500,7 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
     explicit segment(position_type first)
         : base_segment_type(0, 0),
           first(first),
-          intercept(std::numeric_limits<K>::max()),
+          intercept(std::numeric_limits<decltype(intercept)>::max()),
           slope_exponent(0),
           slope_significand(0) {}
 
