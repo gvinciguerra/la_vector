@@ -5,7 +5,7 @@ LA-vector is a compressed bitvector/container supporting efficient random access
 </p>
 
 <p align="center">
-  <a href="https://github.com/gvinciguerra/la_vector/actions?query=workflow%3Abuild"><img src="https://img.shields.io/github/workflow/status/gvinciguerra/la_vector/build" alt="GitHub Workflow Status"></a>
+  <a href="https://github.com/gvinciguerra/la_vector/actions?query=workflow%3Abuild"><img src="https://img.shields.io/github/actions/workflow/status/gvinciguerra/la_vector/build.yml" alt="GitHub Workflow Status"></a>
   <a href="https://github.com/gvinciguerra/la_vector/blob/master/LICENSE"><img src="https://img.shields.io/github/license/gvinciguerra/la_vector" alt="License"></a>
   <a href="https://github.com/gvinciguerra/la_vector/stargazers"><img src="https://img.shields.io/github/stars/gvinciguerra/la_vector" alt="GitHub stars"></a>
   <a href="https://github.com/gvinciguerra/la_vector/network/members"><img alt="GitHub forks" src="https://img.shields.io/github/forks/gvinciguerra/la_vector"></a>
