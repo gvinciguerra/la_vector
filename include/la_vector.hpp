@@ -448,6 +448,7 @@ private:
 
 template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 struct la_vector<K, t_bpc, t_top_level>::constant_bpc {
+    static constexpr auto first_correction_bits = t_bpc;
     static constexpr uint8_t bpc = t_bpc;
     uint32_t first_correction: t_bpc;
     constant_bpc() = default;
@@ -456,9 +457,10 @@ struct la_vector<K, t_bpc, t_top_level>::constant_bpc {
 
 template<typename K, uint8_t t_bpc, template<class, class> class t_top_level>
 struct la_vector<K, t_bpc, t_top_level>::variable_bpc {
+    static constexpr auto first_correction_bits = 16;
     uint8_t bpc;
     uint32_t corrections_offset;
-    uint32_t first_correction: 16;
+    uint32_t first_correction: first_correction_bits;
     variable_bpc() = default;
     variable_bpc(uint8_t bpc, position_type offset) : bpc(bpc), corrections_offset(offset), first_correction(0) {};
 };
@@ -517,8 +519,11 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
             return;
         if (BIT_WIDTH(value) > this->bpc)
             throw std::overflow_error("Segment correction too large");
-        if (i == first)
+        if (i == first) {
+            if (BIT_WIDTH(value) > base_segment_type::first_correction_bits)
+                throw std::overflow_error("First correction too large");
             this->first_correction = value;
+        }
 
         auto idx = get_correction_bit_offset(n, i);
         sdsl::bits::write_int(corrections + (idx >> 6), value, idx & 0x3F, this->bpc);
