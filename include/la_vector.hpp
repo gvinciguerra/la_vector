@@ -55,7 +55,6 @@ class la_vector {
     static constexpr size_t extraction_density = auto_bpc ? 1 : BIT_CEIL(4 * cache_line_bits / t_bpc);
 
     using position_type = typename std::conditional_t<sizeof(K) <= 4, uint32_t, uint64_t>;
-    using signed_position_type = typename std::make_signed_t<position_type>;
     using larger_signed_key_type = typename std::conditional_t<sizeof(K) <= 4, int64_t, __int128>;
     using top_level_type = t_top_level<K, typename std::vector<segment>::const_iterator>;
     using canonical_segment = typename OptimalPiecewiseLinearModel<position_type, K>::CanonicalSegment;
@@ -471,7 +470,7 @@ struct la_vector<K, t_bpc, t_top_level>::segment : base_segment_type {
     static constexpr auto exponent_bits = 5;
     static constexpr auto significand_bits = sizeof(K) <= 4 ? 32 - exponent_bits : 64 - exponent_bits;
     uint32_t first;
-    signed_position_type intercept;
+    position_type intercept;
     uint8_t slope_exponent: exponent_bits;
     uint64_t slope_significand: significand_bits;
 

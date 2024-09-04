@@ -72,34 +72,16 @@ private:
 
     struct Point {
         X x{};
-        SY y{};
+        Y y{};
 
         Slope operator-(const Point &p) const {
-            return {SX(x) - p.x, y - p.y};
+            return {SX(x) - p.x, SY(y) - p.y};
         }
-    };
-
-    template<bool Upper>
-    struct Hull : private std::vector<StoredPoint> {
-        const SY epsilon;
-
-        explicit Hull(SY epsilon) : std::vector<StoredPoint>(), epsilon(Upper ? epsilon : -epsilon) {}
-
-        Point operator[](size_t i) const {
-            auto &p = std::vector<StoredPoint>::operator[](i);
-            return {p.x, SY(p.y) + epsilon};
-        }
-
-        void clear() { std::vector<StoredPoint>::clear(); }
-        void resize(size_t n) { std::vector<StoredPoint>::resize(n); }
-        void reserve(size_t n) { std::vector<StoredPoint>::reserve(n); }
-        size_t size() const { return std::vector<StoredPoint>::size(); }
-        void push(X x, Y y) { std::vector<StoredPoint>::emplace_back(StoredPoint{x, y}); };
     };
 
     const Y epsilon;
-    Hull<false> lower;
-    Hull<true> upper;
+    std::vector<Point> lower;
+    std::vector<Point> upper;
     X first_x = 0;
     X last_x = 0;
     size_t lower_start = 0;
@@ -130,8 +112,10 @@ public:
             throw std::logic_error("Points must be increasing by x.");
 
         last_x = x;
-        Point p1{x, SY(y) + epsilon};
-        Point p2{x, SY(y) - epsilon};
+        auto max_y = std::numeric_limits<Y>::max();
+        auto min_y = std::numeric_limits<Y>::lowest();
+        Point p1{x, y >= max_y - epsilon ? max_y : y + epsilon};
+        Point p2{x, y <= min_y + epsilon ? min_y : y - epsilon};
 
         if (points_in_hull == 0) {
             first_x = x;
@@ -139,8 +123,8 @@ public:
             rectangle[1] = p2;
             upper.clear();
             lower.clear();
-            upper.push(x, y);
-            lower.push(x, y);
+            upper.push_back(p1);
+            lower.push_back(p2);
             upper_start = lower_start = 0;
             ++points_in_hull;
             return true;
@@ -149,8 +133,8 @@ public:
         if (points_in_hull == 1) {
             rectangle[2] = p2;
             rectangle[3] = p1;
-            upper.push(x, y);
-            lower.push(x, y);
+            upper.push_back(p1);
+            lower.push_back(p2);
             ++points_in_hull;
             return true;
         }
@@ -191,7 +175,7 @@ public:
             auto end = upper.size();
             for (; end >= upper_start + 2 && cross(upper[end - 2], upper[end - 1], p1) <= 0; --end);
             upper.resize(end);
-            upper.push(x, y);
+            upper.push_back(p1);
         }
 
         if (p2 - rectangle[0] > slope1) {
@@ -214,7 +198,7 @@ public:
             auto end = lower.size();
             for (; end >= lower_start + 2 && cross(lower[end - 2], lower[end - 1], p2) >= 0; --end);
             lower.resize(end);
-            lower.push(x, y);
+            lower.push_back(p2);
         }
 
         ++points_in_hull;
